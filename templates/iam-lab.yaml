@@ -1,130 +1,173 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  IAM lab: one-time password in Secrets Manager, EC2/S3 permission groups,
-  and three IAM console users (ec2-user1, ec2-user2, s3-user). ec2-user2 is
-  explicitly denied ec2:RunInstances despite EC2 group membership.
+  Lab 2 - Automating Creation of IAM Resources.
+  Creates a shared one-time password in Secrets Manager, an S3 read-only
+  group, an EC2 group, and three IAM console users. ec2-user2 is explicitly
+  denied ec2:RunInstances even though it inherits the EC2 group's allow.
+
+Parameters:
+  OneTimePasswordSecretName:
+    Type: String
+    Default: iam-lab/one-time-password
+    Description: Name of the Secrets Manager secret holding the shared temporary console password.
 
 Resources:
 
   # ---------------------------------------------------------------------
-  # One-time password, auto-generated and stored in Secrets Manager.
-  # Referenced by every user's LoginProfile via a dynamic reference so the
-  # plaintext value is never written into the template or version control.
+  # Shared one-time password, generated and stored by Secrets Manager.
+  # No plaintext password is ever committed to the repository.
   # ---------------------------------------------------------------------
   OneTimePasswordSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
-      Name: iam-lab/onetime-password
-      Description: One-time console password shared by all IAM lab users (reset required on first login)
+      Name: !Ref OneTimePasswordSecretName
+      Description: Shared one-time console password for the lab IAM users. Users must reset it on first login.
       GenerateSecretString:
-        SecretStringTemplate: '{}'
+        SecretStringTemplate: '{"username":"iam-lab-temp-password"}'
         GenerateStringKey: password
-        PasswordLength: 16
-        ExcludePunctuation: true
-        RequireEachIncludedType: true
+        PasswordLength: 20
+        ExcludeCharacters: '"@/\''`,;'
+      Tags:
+        - Key: Project
+          Value: iam-resources-lab
+        - Key: Environment
+          Value: lab
 
   # ---------------------------------------------------------------------
-  # Groups
+  # Least-privilege managed policies
   # ---------------------------------------------------------------------
-  S3ReadOnlyGroup:
+  S3ListBucketsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: S3-List-Buckets-Policy
+      Description: Allows listing S3 buckets only.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ListS3Buckets
+            Effect: Allow
+            Action:
+              - s3:ListAllMyBuckets
+              - s3:GetBucketLocation
+            Resource: '*'
+
+  EC2ListAndLaunchPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: EC2-List-And-Launch-Policy
+      Description: Allows listing EC2 instances and launching new instances.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DescribeEC2Resources
+            Effect: Allow
+            Action:
+              - ec2:DescribeInstances
+              - ec2:DescribeImages
+              - ec2:DescribeInstanceTypes
+              - ec2:DescribeKeyPairs
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeSubnets
+              - ec2:DescribeVpcs
+              - ec2:DescribeAvailabilityZones
+              - ec2:DescribeAccountAttributes
+            Resource: '*'
+          - Sid: LaunchEC2Instances
+            Effect: Allow
+            Action:
+              - ec2:RunInstances
+              - ec2:CreateTags
+            Resource: '*'
+
+  # ---------------------------------------------------------------------
+  # IAM Groups
+  #
+  # Note for whoever scopes the Git sync execution role: IAM evaluates
+  # AddUserToGroup/RemoveUserFromGroup against the *group* ARN, not the
+  # user ARN, even though a user is the one being added/removed.
+  # ---------------------------------------------------------------------
+  S3UserGroup:
     Type: AWS::IAM::Group
     Properties:
-      GroupName: s3-list-buckets-group
-      Policies:
-        - PolicyName: s3-list-buckets
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Sid: ListS3Buckets
-                Effect: Allow
-                Action:
-                  - s3:ListAllMyBuckets
-                  - s3:GetBucketLocation
-                Resource: '*'
+      GroupName: S3-User-Group
+      ManagedPolicyArns:
+        - !Ref S3ListBucketsPolicy
 
-  EC2AdminGroup:
+  EC2UserGroup:
     Type: AWS::IAM::Group
     Properties:
-      GroupName: ec2-list-create-group
-      Policies:
-        - PolicyName: ec2-list-and-create
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Sid: DescribeEC2Resources
-                Effect: Allow
-                Action:
-                  - ec2:DescribeInstances
-                  - ec2:DescribeInstanceStatus
-                  - ec2:DescribeImages
-                  - ec2:DescribeKeyPairs
-                  - ec2:DescribeSecurityGroups
-                  - ec2:DescribeSubnets
-                  - ec2:DescribeVpcs
-                  - ec2:DescribeInstanceTypes
-                  - ec2:DescribeTags
-                Resource: '*'
-              - Sid: CreateEC2Instances
-                Effect: Allow
-                Action:
-                  - ec2:RunInstances
-                Resource: '*'
+      GroupName: EC2-User-Group
+      ManagedPolicyArns:
+        - !Ref EC2ListAndLaunchPolicy
 
   # ---------------------------------------------------------------------
-  # Users
-  # All three share the Secrets Manager one-time password and must reset
-  # it on first console sign-in.
+  # IAM Users - console access, shared one-time password, forced reset
   # ---------------------------------------------------------------------
   EC2User1:
     Type: AWS::IAM::User
     Properties:
       UserName: ec2-user1
       Groups:
-        - !Ref EC2AdminGroup
+        - !Ref EC2UserGroup
       LoginProfile:
         Password: !Sub '{{resolve:secretsmanager:${OneTimePasswordSecret}:SecretString:password}}'
         PasswordResetRequired: true
+      Tags:
+        - Key: Project
+          Value: iam-resources-lab
+        - Key: Environment
+          Value: lab
 
   EC2User2:
     Type: AWS::IAM::User
     Properties:
       UserName: ec2-user2
       Groups:
-        - !Ref EC2AdminGroup
+        - !Ref EC2UserGroup
       LoginProfile:
         Password: !Sub '{{resolve:secretsmanager:${OneTimePasswordSecret}:SecretString:password}}'
         PasswordResetRequired: true
+      # Explicit deny always overrides the EC2 group's allow, so ec2-user2
+      # keeps DescribeInstances (list) but loses RunInstances (create).
       Policies:
-        # Explicit Deny always overrides the Allow inherited from EC2AdminGroup,
-        # so ec2-user2 keeps list/describe access but cannot launch instances.
-        - PolicyName: deny-ec2-instance-creation
+        - PolicyName: Deny-EC2-Launch
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: DenyRunInstances
+              - Sid: DenyLaunchEC2Instances
                 Effect: Deny
                 Action:
                   - ec2:RunInstances
                 Resource: '*'
+      Tags:
+        - Key: Project
+          Value: iam-resources-lab
+        - Key: Environment
+          Value: lab
 
   S3User:
     Type: AWS::IAM::User
     Properties:
       UserName: s3-user
       Groups:
-        - !Ref S3ReadOnlyGroup
+        - !Ref S3UserGroup
       LoginProfile:
         Password: !Sub '{{resolve:secretsmanager:${OneTimePasswordSecret}:SecretString:password}}'
         PasswordResetRequired: true
+      Tags:
+        - Key: Project
+          Value: iam-resources-lab
+        - Key: Environment
+          Value: lab
 
 Outputs:
   OneTimePasswordSecretArn:
-    Description: Retrieve the shared one-time password with `aws secretsmanager get-secret-value --secret-id <this ARN>`
+    Description: ARN of the secret holding the shared one-time console password.
     Value: !Ref OneTimePasswordSecret
-  EC2GroupName:
-    Value: !Ref EC2AdminGroup
-  S3GroupName:
-    Value: !Ref S3ReadOnlyGroup
+  EC2UserGroupName:
+    Value: !Ref EC2UserGroup
+  S3UserGroupName:
+    Value: !Ref S3UserGroup
   EC2User1Name:
     Value: !Ref EC2User1
   EC2User2Name:

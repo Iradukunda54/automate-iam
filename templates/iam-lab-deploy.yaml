@@ -1,5 +1,8 @@
 template-file-path: templates/iam-lab.yaml
 
+parameters:
+  OneTimePasswordSecretName: iam-lab/one-time-password
+
 tags:
-  project: iam-automation-lab
-  managed-by: cloudformation-git-sync
+  Project: iam-resources-lab
+  Environment: lab
