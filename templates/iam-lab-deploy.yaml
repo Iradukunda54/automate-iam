@@ -1,0 +1,5 @@
+template-file-path: templates/iam-lab.yaml
+
+tags:
+  project: iam-automation-lab
+  managed-by: cloudformation-git-sync

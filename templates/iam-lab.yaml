@@ -1,0 +1,133 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  IAM lab: one-time password in Secrets Manager, EC2/S3 permission groups,
+  and three IAM console users (ec2-user1, ec2-user2, s3-user). ec2-user2 is
+  explicitly denied ec2:RunInstances despite EC2 group membership.
+
+Resources:
+
+  # ---------------------------------------------------------------------
+  # One-time password, auto-generated and stored in Secrets Manager.
+  # Referenced by every user's LoginProfile via a dynamic reference so the
+  # plaintext value is never written into the template or version control.
+  # ---------------------------------------------------------------------
+  OneTimePasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: iam-lab/onetime-password
+      Description: One-time console password shared by all IAM lab users (reset required on first login)
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: password
+        PasswordLength: 16
+        ExcludePunctuation: true
+        RequireEachIncludedType: true
+
+  # ---------------------------------------------------------------------
+  # Groups
+  # ---------------------------------------------------------------------
+  S3ReadOnlyGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: s3-list-buckets-group
+      Policies:
+        - PolicyName: s3-list-buckets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ListS3Buckets
+                Effect: Allow
+                Action:
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucketLocation
+                Resource: '*'
+
+  EC2AdminGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: ec2-list-create-group
+      Policies:
+        - PolicyName: ec2-list-and-create
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DescribeEC2Resources
+                Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                  - ec2:DescribeImages
+                  - ec2:DescribeKeyPairs
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeInstanceTypes
+                  - ec2:DescribeTags
+                Resource: '*'
+              - Sid: CreateEC2Instances
+                Effect: Allow
+                Action:
+                  - ec2:RunInstances
+                Resource: '*'
+
+  # ---------------------------------------------------------------------
+  # Users
+  # All three share the Secrets Manager one-time password and must reset
+  # it on first console sign-in.
+  # ---------------------------------------------------------------------
+  EC2User1:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: ec2-user1
+      Groups:
+        - !Ref EC2AdminGroup
+      LoginProfile:
+        Password: !Sub '{{resolve:secretsmanager:${OneTimePasswordSecret}:SecretString:password}}'
+        PasswordResetRequired: true
+
+  EC2User2:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: ec2-user2
+      Groups:
+        - !Ref EC2AdminGroup
+      LoginProfile:
+        Password: !Sub '{{resolve:secretsmanager:${OneTimePasswordSecret}:SecretString:password}}'
+        PasswordResetRequired: true
+      Policies:
+        # Explicit Deny always overrides the Allow inherited from EC2AdminGroup,
+        # so ec2-user2 keeps list/describe access but cannot launch instances.
+        - PolicyName: deny-ec2-instance-creation
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DenyRunInstances
+                Effect: Deny
+                Action:
+                  - ec2:RunInstances
+                Resource: '*'
+
+  S3User:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: s3-user
+      Groups:
+        - !Ref S3ReadOnlyGroup
+      LoginProfile:
+        Password: !Sub '{{resolve:secretsmanager:${OneTimePasswordSecret}:SecretString:password}}'
+        PasswordResetRequired: true
+
+Outputs:
+  OneTimePasswordSecretArn:
+    Description: Retrieve the shared one-time password with `aws secretsmanager get-secret-value --secret-id <this ARN>`
+    Value: !Ref OneTimePasswordSecret
+  EC2GroupName:
+    Value: !Ref EC2AdminGroup
+  S3GroupName:
+    Value: !Ref S3ReadOnlyGroup
+  EC2User1Name:
+    Value: !Ref EC2User1
+  EC2User2Name:
+    Value: !Ref EC2User2
+  S3UserName:
+    Value: !Ref S3User
